@@ -34,10 +34,14 @@ pico_generate_pio_header(STARTRACKER ${CMAKE_CURRENT_LIST_DIR}/pio/vsync.pio)
 pico_generate_pio_header(STARTRACKER ${CMAKE_CURRENT_LIST_DIR}/pio/rgb.pio)
 
 # must match with executable name and source file names
-target_sources(STARTRACKER PRIVATE tracker.c ${CMAKE_CURRENT_LIST_DIR}/libs/vga16_graphics_v2.c ${CMAKE_CURRENT_LIST_DIR}/libs/mpu6050.c ${CMAKE_CURRENT_LIST_DIR}/libs/vga_graphics_v3.c)
+target_sources(STARTRACKER PRIVATE 
+    tracker.c magnetometer.c orientation.c
+    ${CMAKE_CURRENT_LIST_DIR}/libs/mpu6050.c
+    ${CMAKE_CURRENT_LIST_DIR}/libs/vga16_graphics_v2.c 
+    ${CMAKE_CURRENT_LIST_DIR}/libs/vga_graphics_v3.c)
 
 # Add pico_multicore which is required for multicore functionality
-target_link_libraries(STARTRACKER pico_stdlib pico_bootsel_via_double_reset pico_multicore hardware_pwm hardware_dma hardware_irq hardware_adc hardware_pio hardware_i2c hardware_clocks)
+target_link_libraries(STARTRACKER pico_stdlib pico_bootsel_via_double_reset pico_multicore hardware_pwm hardware_dma hardware_irq hardware_adc hardware_pio hardware_i2c hardware_clocks m)
 
 # create map/bin/hex file etc.
 pico_add_extra_outputs(STARTRACKER)
