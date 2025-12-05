@@ -1,8 +1,9 @@
 /**
- * Orientation sensor fusion using complementary filter
- * Combines accelerometer, gyroscope, and magnetometer data
+ * Tony Kariuki (akk85@cornell.edu)
+ * 
+ * orientation.c
+ *
  */
-
 #include <math.h>
 #include "orientation.h"
 

@@ -1,6 +1,8 @@
 /**
- * Orientation sensor fusion
- * Combines magnetometer and IMU data using complementary filter
+ * Tony Kariuki (akk85@cornell.edu)
+ * 
+ * orientation.h
+ *
  */
 
 #ifndef ORIENTATION_H
