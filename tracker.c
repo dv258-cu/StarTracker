@@ -5,16 +5,30 @@
  */
 
 #include <stdio.h>
-#include <string.h>
+#include <stdlib.h>
 #include <math.h>
-#include "pico/stdlib.h"
-#include "hardware/i2c.h"
+#include <stdlib.h>
 #include "magnetometer.h"
 #include "libs/mpu6050.h"
+#include "libs/stepper.h"
+#include "libs/gps.h"
+#include "libs/vga16_graphics_v2.h"
 #include "orientation.h"
 #include "libs/pt_cornell_rp2040_v1_4.h"
-#include "libs/vga16_graphics_v2.h"
-#include "libs/vga_graphics_v3.h"
+
+// Include Pico libraries
+#include "pico/stdlib.h"
+#include "pico/divider.h"
+#include "pico/multicore.h"
+// Include hardware libraries
+#include "hardware/pio.h"
+#include "hardware/dma.h"
+#include "hardware/clocks.h"
+#include "hardware/pll.h"
+#include "hardware/spi.h"
+#include "hardware/adc.h"
+#include "hardware/uart.h"
+#include "hardware/pwm.h"
 
 #define PI 3.14159265358979323846
 
@@ -24,243 +38,247 @@ static imu_data imu_data_global;
 static orientation current_orientation;
 static const float dt = 0.05f;  // 50ms = 0.05 seconds
 
-// Display buffer for text
-static char display_buffer[100];
-static char compass_buffer[100];
+// Include Stepper Motor Library
+#include "libs/stepper.h"
 
-// Helper function to normalize angle difference (handles 360° wrap-around)
-static float normalize_angle_diff(float angle1, float angle2) {
-    float diff = angle2 - angle1;
-    if (diff > 180.0f) {
-        diff -= 360.0f;
-    }
-    if (diff < -180.0f) {
-        diff += 360.0f;
-    }
-    return diff;
-}
+// Include GPS Library
+#include "libs/gps.h"
 
-// Calibrate gyro bias (collect samples while device is stationary)
-static void calibrate_gyro(void) {
-    printf("Calibrating gyro keep device still for 5 seconds\r\n");
-    for (int i = 0; i < 100; i++) {
-        imu_data imu_value = imu_read();
-        orientation_calibrate_gyro(imu_value.gyro_x, imu_value.gyro_y, imu_value.gyro_z);
-        sleep_ms(50);
-    }
-    printf("Calibration complete!\n");
-}
+#define FRAME_RATE 33000
 
-// Draw compass circle 
-static void draw_compass_circle(int center_x, int center_y, int radius, float heading) {
+#define PWM_OUT 15
+#define SYSTEM_CLK_KHZ 150000
+#define CLK_DIV 250.0f
 
-    int text_area_height = 30;  
-    fillRect(center_x - radius - 5, center_y - radius - 5, 
-             (radius + 5) * 2, (radius + 5) * 2 + text_area_height, BLACK);
-    
-    drawCircle(center_x, center_y, radius, WHITE);
-    
-    // North (0 degrees, top)
-    drawLine(center_x, center_y - radius, 
-             center_x, center_y - radius + 10, WHITE);
-    setCursor(center_x - 3, center_y - radius - 12);
-    writeString("N");
-    
-    // East (90 degrees, right)
-    drawLine(center_x + radius, center_y, 
-             center_x + radius - 10, center_y, WHITE);
-    setCursor(center_x + radius + 5, center_y - 3);
-    writeString("E");
-    
-    // South (180 degrees, bottom)
-    drawLine(center_x, center_y + radius, 
-             center_x, center_y + radius - 10, WHITE);
-    setCursor(center_x - 3, center_y + radius + 12);
-    writeString("S");
-    
-    // West (270 degrees, left)
-    drawLine(center_x - radius, center_y, 
-             center_x - radius + 10, center_y, WHITE);
-    setCursor(center_x - radius - 8, center_y - 3);
-    writeString("W");
-    
-    // Draw degree markers every 30 degrees
-    for (int deg = 0; deg < 360; deg += 30) {
-        float angle_rad = (deg * PI / 180.0f);
-        int x1 = center_x + (int)((radius - 5) * sin(angle_rad));
-        int y1 = center_y - (int)((radius - 5) * cos(angle_rad));
-        int x2 = center_x + (int)(radius * sin(angle_rad));
-        int y2 = center_y - (int)(radius * cos(angle_rad));
-        drawLine(x1, y1, x2, y2, WHITE);
-    }
-    
-    float adjusted_angle = (90.0f - heading) * PI / 180.0f;
-    
-    // Calculate arrow endpoint on circle
-    int arrow_x = center_x + (int)((radius - 5) * cos(adjusted_angle));
-    int arrow_y = center_y - (int)((radius - 5) * sin(adjusted_angle));
-    
-    drawLine(center_x, center_y, arrow_x, arrow_y, YELLOW);
-    
-    // Draw arrowhead (small triangle)
-    float arrow_angle1 = adjusted_angle + 0.3f; // ~17 degrees offset
-    float arrow_angle2 = adjusted_angle - 0.3f;
-    int arrowhead_length = 10;
-    int arrow_x1 = arrow_x + (int)(arrowhead_length * cos(arrow_angle1));
-    int arrow_y1 = arrow_y - (int)(arrowhead_length * sin(arrow_angle1));
-    int arrow_x2 = arrow_x + (int)(arrowhead_length * cos(arrow_angle2));
-    int arrow_y2 = arrow_y - (int)(arrowhead_length * sin(arrow_angle2));
-    
-    drawLine(arrow_x, arrow_y, arrow_x1, arrow_y1, YELLOW);
-    drawLine(arrow_x, arrow_y, arrow_x2, arrow_y2, YELLOW);
-    drawLine(arrow_x1, arrow_y1, arrow_x2, arrow_y2, YELLOW);
-    
-    // Draw center point
-    drawCircle(center_x, center_y, 2, YELLOW);
-    
-    // Clear and display heading value below circle
-    // Clear a rectangle for the text to avoid overwriting issues
-    int text_x = center_x - 50;
-    int text_y = center_y + radius + 15;
-    int text_w = 100;
-    int text_h = 15;
-    fillRect(text_x, text_y, text_w, text_h, BLACK);
-    
-    setCursor(text_x + 5, text_y);
-    sprintf(compass_buffer, "Heading: %5.1f", heading);
-    writeString(compass_buffer);
-}
+// --- Buffer Configuration ---
+#define NMEA_BUFFER_SIZE 256
+char nmea_buffer[NMEA_BUFFER_SIZE];
+int buffer_index = 0;
+bool new_sentence_ready = false;
 
-// VGA Display Thread
-static PT_THREAD (protothread_display(struct pt *pt))
-{
+#define GPS_RX 13
+#define GPS_TX 12
+
+#define UART_ID uart0
+#define BAUD_RATE 9600
+
+// Stepper Motor Control Pins
+#define PITCH_DIR 16
+#define AZIMUTH_DIR 14
+#define BOTTOM_MOTOR 15
+#define MOTOR_PITCH 17
+#define MOTOR_ROTATE_DIR 19
+#define MOTOR_ROTATE_STEP 18
+
+// Global variables for stepping gimble 
+float magnetic_north = 0.0f;
+float heading;
+float heading_difference;
+int steps_to_do = 0;
+float steps_per_degree = 1600.0f / 360.0f;  // ~4.444 steps per degree
+const float DEADBAND = 5.0f;  // error degree tolerance
+const int MAX_STEPS = 100;    // ~22.5 degrees per iteration (6% of full rotation)
+
+// protothread to display compass like approaching magnetic north on vga screen 
+static PT_THREAD (protothread_vga(struct pt *pt)){
     PT_BEGIN(pt);
     
-    static int y_position;
-    static int line_height = 20;
-
-    static int data_box_x = 10;
-    static int data_box_y = 10;
-    static int data_box_w = 150;
-    static int data_box_h = 150;
-    
-    static int circle_center_x = 450;
-    static int circle_center_y = 200;
-    static int circle_radius = 120;
-    
-    // Heading smoothing filter (exponential moving average)
-    static float smoothed_heading = 0.0f;
-    static bool first_heading = true;
-    const float smoothing_factor = 0.5f; 
-    
-    // Clear screen initially
-    fillRect(0, 0, 640, 480, BLACK);
+    static short center_x = 320; 
+    static short center_y = 240;  
+    static short compass_radius = 150;  
+    static float heading_rad;
+    static short needle_x, needle_y;
+    static char heading_str[20];
+    static char error_str[20];
+    static char color_indicator;
     
     while(1) {
-        // Read sensors
-        magnetometer_data = magnetometer_calibrate();
-        imu_data_global = imu_read();
+        // Clear compass area (draw background circle)
+        fillCircle(center_x, center_y, compass_radius + 5, BLACK);
+        drawCircle(center_x, center_y, compass_radius, WHITE);
         
-        // Update orientation using sensor fusion
-        orientation_update(imu_data_global.accel_x, imu_data_global.accel_y, imu_data_global.accel_z,
-                         imu_data_global.gyro_x, imu_data_global.gyro_y, imu_data_global.gyro_z,
-                         magnetometer_data.x, magnetometer_data.y, magnetometer_data.z,
-                         dt);
+        // cardinal directions
+        drawChar(center_x - 3, center_y - compass_radius - 15, 'N', RED, BLACK, 2);
+        drawChar(center_x + compass_radius + 10, center_y - 3, 'E', WHITE, BLACK, 2);
+        drawChar(center_x - 3, center_y + compass_radius + 10, 'S', WHITE, BLACK, 2);
+        drawChar(center_x - compass_radius - 15, center_y - 3, 'W', WHITE, BLACK, 2);
         
-        current_orientation = orientation_get();
-        
-        fillRect(data_box_x + 2, data_box_y + 2, data_box_w - 4, data_box_h - 4, BLACK);
-        
-        drawRect(data_box_x, data_box_y, data_box_w, data_box_h, WHITE);
-        
-        setTextColor(WHITE);
-        setTextSize(1);
-        setTextWrap(0);
-        
-        setCursor(data_box_x + 5, data_box_y + 5);
-        writeString("StarTracker Sensor Data");
-        
-        y_position = data_box_y + 30;
-        
-        // Display Orientation (Euler angles)
-        setCursor(data_box_x + 5, y_position);
-        writeString("Orientation (deg):");
-        y_position += line_height;
-        setCursor(data_box_x + 15, y_position);
-        sprintf(display_buffer, "Roll:  %6.1f", current_orientation.roll);
-        writeString(display_buffer);
-        y_position += line_height;
-        setCursor(data_box_x + 15, y_position);
-        sprintf(display_buffer, "Pitch: %6.1f", current_orientation.pitch);
-        writeString(display_buffer);
-        y_position += line_height;
-        setCursor(data_box_x + 15, y_position);
-        sprintf(display_buffer, "Yaw:   %6.1f", current_orientation.yaw);
-        writeString(display_buffer);
-        
-        float raw_heading = current_orientation.yaw;
-        
-        // Normalize yaw to 0-360 range if needed
-        if (raw_heading < 0.0f) {
-            raw_heading += 360.0f;
-        }
-        if (raw_heading >= 360.0f) {
-            raw_heading -= 360.0f;
+        // Draw tick marks every 30 degrees
+        for (int i = 0; i < 12; i++) {
+            float angle_rad = (i * 30.0f) * PI / 180.0f;
+            short x1 = center_x + (short)((compass_radius - 10) * sinf(angle_rad));
+            short y1 = center_y - (short)((compass_radius - 10) * cosf(angle_rad));
+            short x2 = center_x + (short)(compass_radius * sinf(angle_rad));
+            short y2 = center_y - (short)(compass_radius * cosf(angle_rad));
+            drawLine(x1, y1, x2, y2, WHITE);
         }
         
-        // Light smoothing filter for the fused heading (it's already smoothed by orientation system)
-        if (first_heading) {
-            smoothed_heading = raw_heading;
-            first_heading = false;
+        heading_rad = (heading - 90.0f) * PI / 180.0f;
+        
+        // Draw compass needle pointing to current heading (red)
+        needle_x = center_x + (short)(compass_radius * 0.8f * cosf(heading_rad));
+        needle_y = center_y - (short)(compass_radius * 0.8f * sinf(heading_rad));
+        drawLine(center_x, center_y, needle_x, needle_y, RED);
+        
+        // Draw small circle at center
+        fillCircle(center_x, center_y, 5, RED);
+        
+        // Draw arrow pointing to magnetic north (green)
+        short north_x = center_x + (short)(compass_radius * 0.6f * cosf(-PI/2));  // -90° = North
+        short north_y = center_y - (short)(compass_radius * 0.6f * sinf(-PI/2));
+        drawLine(center_x, center_y, north_x, north_y, GREEN);
+        
+        // Color indicator based on error from magnetic north
+        if (fabsf(heading_difference) < 5.0f) {
+            color_indicator = GREEN;  
+        } else if (fabsf(heading_difference) < 15.0f) {
+            color_indicator = YELLOW;  
         } else {
-            float diff = normalize_angle_diff(smoothed_heading, raw_heading);
-            
-            // Light smoothing since orientation system already does fusion
-            float adaptive_factor = 0.2f;  // Light smoothing
-            if (fabsf(diff) > 5.0f) {
-                adaptive_factor = 0.5f;  // Faster response for larger changes
-            }
-            
-            smoothed_heading += diff * adaptive_factor;
-            if (smoothed_heading < 0.0f) {
-                smoothed_heading += 360.0f;
-            }
-            if (smoothed_heading >= 360.0f) {
-                smoothed_heading -= 360.0f;
-            }
+            color_indicator = RED;  
         }
         
-        float heading = smoothed_heading;
+        // Draw status box at bottom
+        fillRect(10, 450, 300, 25, BLACK);
+        drawRect(10, 450, 300, 25, WHITE);
         
-        draw_compass_circle(circle_center_x, circle_center_y, circle_radius, heading);
+        // Display heading value
+        sprintf(heading_str, "Heading: %.1f", heading);
+        setCursor(15, 455);
+        setTextColor(WHITE);
+        writeString(heading_str);
         
-        // Print heading to serial
-        printf("Heading: %5.1f\r\n", heading);
-
+        // Display error from magnetic north
+        sprintf(error_str, "Error: %.1f", heading_difference);
+        setCursor(200, 455);
+        setTextColor(color_indicator);
+        writeString(error_str);
         
-        PT_YIELD_usec(50000);
+        // Draw indicator bar showing alignment (0-100%)
+        short bar_width = (short)(280 * (1.0f - fabsf(heading_difference) / 180.0f));
+        if (bar_width < 0) bar_width = 0;
+        fillRect(15, 430, bar_width, 10, color_indicator);
+        drawRect(15, 430, 280, 10, WHITE);
+        
+        PT_YIELD_usec(50000);  // Update every 50ms
     }
     
     PT_END(pt);
 }
 
+
+
+void on_uart_rx() {
+    // Only read one byte at a time
+    while (uart_is_readable(UART_ID)) {
+        char c = uart_getc(UART_ID);
+        // Add character to buffer if not full
+        if (buffer_index < NMEA_BUFFER_SIZE - 1) {
+            nmea_buffer[buffer_index++] = c;
+            // Check for end of sentence (e.g., newline character \n or \r)
+            if (c == '\n') {
+                nmea_buffer[buffer_index] = '\0'; // Null-terminate the string
+                parseNMEA(nmea_buffer);          // Process non-blocking data
+                buffer_index = 0;                // Reset buffer
+                break; // Exit the while loop
+            }
+        } else {
+            // Buffer overflow, reset index
+            buffer_index = 0;
+        }
+    }
+}
+
+void initGPS() {
+    // Set up our UART with the specified baud rate
+    uart_init(UART_ID, BAUD_RATE);
+
+    // Set the GPIO pins for the UART function
+    gpio_set_function(GPS_TX, GPIO_FUNC_UART);
+    gpio_set_function(GPS_RX, GPIO_FUNC_UART);
+
+    // Disable hardware flow control (typical for GPS modules)
+    uart_set_hw_flow(UART_ID, false, false);
+
+    // Set data format (8 bits, no parity, 1 stop bit - standard for NMEA)
+    uart_set_format(UART_ID, 8, 1, UART_PARITY_NONE);
+
+    // Set up the interrupt handler
+    int UART_IRQ = UART_ID == uart0 ? UART0_IRQ : UART1_IRQ;
+
+    // And set up and enable the interrupt
+    irq_set_exclusive_handler(UART_IRQ, on_uart_rx);
+    irq_set_enabled(UART_IRQ, true);
+
+    // Enable the UART to fire an interrupt on receive data ready
+    uart_set_irq_enables(UART_ID, true, false);
+
+    printf("UART initialized on GPIO%d (RX) at %d baud.\n", GPS_RX, BAUD_RATE);   
+}
+
 int main(void) 
 {
+    set_sys_clock_khz(150000, true) ;
     stdio_init_all();
-    sleep_ms(2000); 
-
     initVGA();
 
-    // Initialize the sensors 
-    magnetometer_init();
-    imu_init();
-    mpu6050_reset();
+    // GPS
+    initGPS();
+    initSteppers();
+    initMagnetometer();
 
-    orientation_init();
+    magnetometer_data = magnetometer_calibrate();
+        
+    heading = magnetometer_get_filtered_heading(magnetometer_data);
     
-    calibrate_gyro();
+    printf("heading: %f\n", heading);
     
-    pt_add_thread(protothread_display);
+    // take shortest path to magnetic north
+    heading_difference = heading - magnetic_north;
+    if (heading_difference > 180.0f) {
+        heading_difference = heading_difference - 360.0f;
+    } else if (heading_difference < -180.0f) {
+        heading_difference = heading_difference + 360.0f;
+    }
+
+    if (fabsf(heading_difference) > DEADBAND) { 
+        steps_to_do = (int)(heading_difference * steps_per_degree);
+    }
+
+    stepMotor(steps_to_do, MOTOR_PITCH);
     
-    pt_schedule_start;
+    /**
+    use the magnetometer to drive the stepper motors to magnetic north 
+    stepmotor takes 1600 steps per revolution
+    */
+    // while (true){
+
+    //     magnetometer_data = magnetometer_calibrate();
+        
+    //     heading = magnetometer_get_filtered_heading(magnetometer_data);
+        
+    //     printf("heading: %f\n", heading);
+        
+    //     // take shortest path to magnetic north
+    //     heading_difference = heading - magnetic_north;
+    //     if (heading_difference > 180.0f) {
+    //         heading_difference = heading_difference - 360.0f;
+    //     } else if (heading_difference < -180.0f) {
+    //         heading_difference = heading_difference + 360.0f;
+    //     }
+
+    //     if (fabsf(heading_difference) > DEADBAND) { 
+    //         steps_to_do = (int)(heading_difference * steps_per_degree);
+            
+    //         // Limit steps to prevent overshoot and allow feedback during movement
+    //         // if (steps_to_do > MAX_STEPS) steps_to_do = MAX_STEPS;
+    //         // else if (steps_to_do < -MAX_STEPS) steps_to_do = -MAX_STEPS;
+
+    //         stepMotor(steps_to_do, MOTOR_PITCH);
+    //     } 
+
+    //     // sleep_ms(50);  // Control loop delay
+    // }
+
+
+
 }
